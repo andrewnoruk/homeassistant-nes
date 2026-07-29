@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 
 from custom_components.nes.sensor import (

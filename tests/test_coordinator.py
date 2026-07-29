@@ -5,15 +5,13 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
+from conftest import MOCK_USAGE_DATA
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.nes.api import NESApiClient, NESAuthError, NESConnectionError
 from custom_components.nes.coordinator import NESDataUpdateCoordinator
-
-from conftest import MOCK_USAGE_DATA
 
 
 async def test_coordinator_successful_update(hass: HomeAssistant) -> None:

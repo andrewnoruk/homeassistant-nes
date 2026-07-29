@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
@@ -46,7 +45,7 @@ class NESConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except NESConnectionError:
                 errors["base"] = "cannot_connect"
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Unexpected error during config flow")
                 errors["base"] = "unknown"
             else:
@@ -96,7 +95,7 @@ class NESConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except NESConnectionError:
                 errors["base"] = "cannot_connect"
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Unexpected error during reauth")
                 errors["base"] = "unknown"
             else:

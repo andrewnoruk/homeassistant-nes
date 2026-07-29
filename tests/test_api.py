@@ -9,8 +9,8 @@ import pytest
 
 from custom_components.nes.api import (
     NESApiClient,
-    NESAuthError,
     NESApiError,
+    NESAuthError,
 )
 
 
