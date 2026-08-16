@@ -203,6 +203,77 @@ class TestServiceLocations:
         assert client._service_type == "Lighting"
         assert client._payment_due_date == "2026-08-21"
 
+    async def test_selected_account_context_and_id_types_reach_usage(self) -> None:
+        """Linked-account routing context and native IDs reach the usage API."""
+        summary = _make_response(
+            200,
+            {
+                "accountContext": {
+                    "accountNumber": 7013678056,
+                    "accessLevel": "1",
+                    "personId": 42,
+                },
+                "accountSummaryType": {"paymentDueDate": "2026-08-21"},
+            },
+        )
+        services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [{"serviceId": 987654, "serviceType": "E"}]
+                }
+            },
+        )
+        usage = _make_response(
+            200,
+            {"history": [{"billedConsumption": "900", "billedCharge": "120.00"}]},
+        )
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[_make_ctx(summary), _make_ctx(services), _make_ctx(usage)]
+        )
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._customer_id = "105112"
+        client._guid = "customer-guid"
+
+        await client.async_select_service("7013678056", "987654")
+        history = await client.async_get_usage()
+
+        assert history[0]["billedConsumption"] == "900"
+        assert session.post.call_args_list[1].kwargs["json"] == {
+            "customerId": "105112",
+            "guid": "customer-guid",
+            "accountContext": {
+                "accountNumber": 7013678056,
+                "accessLevel": "1",
+                "personId": 42,
+            },
+        }
+        assert session.post.call_args_list[2].kwargs["json"] == {
+            "customerId": "105112",
+            "accountContext": {
+                "accountNumber": 7013678056,
+                "serviceId": 987654,
+                "billCycleCode": "2026-08-21",
+                "serviceType": "E",
+            },
+            "direction": "current",
+            "page": "1",
+            "maxPerPage": "13",
+        }
+
+    async def test_usage_rejects_response_without_history(self) -> None:
+        """A changed or failed usage response is not mistaken for no usage."""
+        session = MagicMock()
+        session.post = MagicMock(return_value=_make_ctx(_make_response(200, {})))
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._service_id = "service-1"
+
+        with pytest.raises(NESApiError, match="history list"):
+            await client.async_get_usage()
+
     async def test_select_service_rejects_stale_selection(self) -> None:
         """A removed service cannot silently fall back to the first service."""
         summary = _make_response(200, {"accountSummaryType": {}})

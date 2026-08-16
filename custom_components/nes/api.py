@@ -99,8 +99,8 @@ class NESApiClient:
         self._token_expiry: datetime | None = None
         self._customer_id: str | None = None
         self._guid: str | None = None
-        self._account_number: str | None = None
-        self._service_id: str | None = None
+        self._account_number: str | int | None = None
+        self._service_id: str | int | None = None
         self._service_type: str | None = None
         self._payment_due_date: str | None = None
         self._token_lock = asyncio.Lock()
@@ -413,12 +413,18 @@ class NESApiClient:
         self._customer_id = token_user.get("customerId", self._customer_id)
         self._guid = token_user.get("guid", self._guid)
 
-    def _account_request(self, account_number: str | None = None) -> dict[str, Any]:
+    def _account_request(
+        self,
+        account_number: str | int | None = None,
+        account_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Build the account request shape used by the NES portal."""
         request: dict[str, Any] = {"customerId": self._customer_id}
         if self._guid:
             request["guid"] = self._guid
-        if account_number is not None:
+        if account_context is not None:
+            request["accountContext"] = account_context
+        elif account_number is not None:
             request["accountContext"] = {"accountNumber": account_number}
         return request
 
@@ -533,12 +539,26 @@ class NESApiClient:
         return locations
 
     async def async_select_service(
-        self, account_number: str, service_id: str | None = None
+        self, account_number: str | int, service_id: str | int | None = None
     ) -> None:
         """Load and select one account service for subsequent usage calls."""
         request = self._account_request(account_number)
         summary = await self._async_post_json("/rest/account/summary", request)
-        service_result = await self._async_post_json("/rest/account/services", request)
+
+        # Selecting an account in the NES portal replaces its minimal context with
+        # the canonical context returned by the summary endpoint. Preserve that
+        # behavior instead of continuing with a reconstructed account-number-only
+        # context; linked accounts can carry additional routing information here.
+        account_context = summary.get("accountContext")
+        if not isinstance(account_context, dict) or account_context.get(
+            "accountNumber"
+        ) in (None, ""):
+            account_context = {"accountNumber": account_number}
+
+        service_result = await self._async_post_json(
+            "/rest/account/services",
+            self._account_request(account_context=account_context),
+        )
         services = [
             service
             for service in self._services_from_response(service_result)
@@ -562,8 +582,10 @@ class NESApiClient:
         summary_type = summary.get("accountSummaryType")
         if not isinstance(summary_type, dict):
             summary_type = {}
-        self._account_number = account_number
-        self._service_id = str(selected_service.get("serviceId"))
+        self._account_number = account_context["accountNumber"]
+        # Keep NES identifiers in their native JSON type. The original integration
+        # passed serviceId through unchanged, and the portal does the same.
+        self._service_id = selected_service["serviceId"]
         self._service_type = selected_service.get(
             "serviceType"
         ) or selected_service.get("serviceCat")
@@ -571,8 +593,8 @@ class NESApiClient:
 
     async def async_get_customer(
         self,
-        account_number: str | None = None,
-        service_id: str | None = None,
+        account_number: str | int | None = None,
+        service_id: str | int | None = None,
     ) -> dict[str, Any]:
         """Fetch customer and service information.
 
@@ -609,7 +631,7 @@ class NESApiClient:
             selected_account = account_number or acct_ctx.get("accountNumber")
             if not selected_account:
                 raise NESApiError("NES response did not include an account number")
-            await self.async_select_service(str(selected_account), service_id)
+            await self.async_select_service(selected_account, service_id)
 
             return result
 
@@ -620,13 +642,10 @@ class NESApiClient:
 
     async def async_get_usage(self) -> list[dict[str, Any]]:
         """Fetch 13-month usage history."""
-        await self._async_ensure_token()
-
-        if not self._service_id:
+        if self._service_id is None:
             LOGGER.warning("No serviceId available, cannot fetch usage")
             return []
 
-        url = f"{API_BASE_URL}/rest/usage"
         payload = {
             "customerId": self._customer_id,
             "accountContext": {
@@ -639,28 +658,18 @@ class NESApiClient:
             "page": "1",
             "maxPerPage": "13",
         }
-
-        try:
-            async with self._session.post(
-                url, headers=self._auth_headers(), json=payload
-            ) as resp:
-                if resp.status == 401:
-                    await self.async_authenticate()
-                    async with self._session.post(
-                        url, headers=self._auth_headers(), json=payload
-                    ) as retry_resp:
-                        self._verify_response(retry_resp)
-                        result = await retry_resp.json()
-                else:
-                    self._verify_response(resp)
-                    result = await resp.json()
-
-            return result.get("history", [])
-
-        except aiohttp.ClientError as err:
-            raise NESConnectionError(
-                f"Connection error fetching usage data: {err}"
-            ) from err
+        result = await self._async_post_json("/rest/usage", payload)
+        history = result.get("history")
+        if not isinstance(history, list):
+            raise NESApiError("NES usage response did not include a history list")
+        if not history:
+            LOGGER.warning(
+                "NES returned no usage history for the selected account "
+                "(service type: %s, bill cycle available: %s)",
+                self._service_type,
+                self._payment_due_date is not None,
+            )
+        return [item for item in history if isinstance(item, dict)]
 
     async def async_get_rates(self) -> dict[str, Any]:
         """Fetch current residential rates from the public NES rates page."""
