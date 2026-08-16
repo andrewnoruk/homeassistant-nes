@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -360,6 +361,169 @@ class TestServiceLocations:
             "page": "1",
             "maxPerPage": "13",
         }
+
+    async def test_current_graph_service_uses_detail_and_billing_apis(self) -> None:
+        """Current portal responses are combined into legacy billed rows."""
+        account_context = {
+            "accountNumber": 7013678056,
+            "access": "P",
+            "personId": 42,
+        }
+        summary = _make_response(
+            200,
+            {
+                "accountContext": account_context,
+                "accountSummaryType": {"paymentDueDate": "Aug 12, 2026"},
+            },
+        )
+        services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "servicesForGraph": [
+                        {
+                            "billDate": "2026-07-22",
+                            "meterNumber": "meter-1",
+                            "serviceCat": "Dev",
+                            "serviceContract": "contract-1",
+                            "serviceId": 258032872526,
+                            "serviceNumber": "service-number-1",
+                            "serviceType": "P",
+                        }
+                    ]
+                }
+            },
+        )
+        detail = _make_response(
+            200,
+            {
+                "history": [
+                    {
+                        "usageDate": "2026-06-21",
+                        "usageCategory": "M",
+                        "usageConsumptionValue": None,
+                    },
+                    {
+                        "usageDate": "2026-06-22",
+                        "usageCategory": "D",
+                        "usageConsumptionValue": 0.0,
+                    },
+                    {
+                        "usageDate": "2026-06-23",
+                        "usageCategory": "D",
+                        "usageConsumptionValue": 10.5,
+                    },
+                    {
+                        "usageDate": "2026-07-21",
+                        "usageCategory": "D",
+                        "usageConsumptionValue": 20.25,
+                    },
+                    {
+                        "usageDate": "2026-07-22",
+                        "usageCategory": "D",
+                        "usageConsumptionValue": 30.0,
+                    },
+                ]
+            },
+        )
+        billing = _make_response(
+            200,
+            {
+                "billingData": [
+                    {"billingDate": "07/22/2026", "paymentAmount": "$306.93"},
+                    {"billingDate": "06/22/2026", "paymentAmount": "$20.00"},
+                ]
+            },
+        )
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[
+                _make_ctx(summary),
+                _make_ctx(services),
+                _make_ctx(detail),
+                _make_ctx(billing),
+            ]
+        )
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._customer_id = "105112"
+        client._guid = "customer-guid"
+
+        await client.async_select_service("7013678056", "258032872526")
+        with patch(
+            "custom_components.nes.api.dt_util.now",
+            return_value=datetime(2026, 8, 16, 12, 0),
+        ):
+            history = await client.async_get_usage()
+
+        assert history == [
+            {
+                "chargeDate": "Jun 2026",
+                "chargeDateRaw": "22-Jun-2026",
+                "billStartDate": "2026-05-23",
+                "billEndDate": "2026-06-22",
+                "billedConsumption": None,
+                "billedCharge": 20.0,
+                "daysOfService": 30,
+                "uom": "KWH",
+            },
+            {
+                "chargeDate": "Jul 2026",
+                "chargeDateRaw": "22-Jul-2026",
+                "billStartDate": "2026-06-22",
+                "billEndDate": "2026-07-22",
+                "billedConsumption": 30.75,
+                "billedCharge": 306.93,
+                "daysOfService": 30,
+                "uom": "KWH",
+            },
+        ]
+
+        detail_call = next(
+            call
+            for call in session.post.call_args_list
+            if call.args[0].endswith("/rest/usage/detail/month")
+        )
+        assert detail_call.kwargs["json"] == {
+            "customerId": "105112",
+            "fromDate": "2025-07-01 12:00",
+            "toDate": "2026-08-15 11:59",
+            "billDate": "2026-07-22",
+            "meterNumber": "meter-1",
+            "serviceNumber": "service-number-1",
+            "serviceId": 258032872526,
+            "serviceType": "P",
+            "accountContext": account_context,
+            "contractNum": "contract-1",
+            "netContractNum": None,
+        }
+        billing_call = next(
+            call
+            for call in session.post.call_args_list
+            if call.args[0].endswith("/rest/billing/history")
+        )
+        assert billing_call.kwargs["json"] == {
+            "customerId": "105112",
+            "guid": "customer-guid",
+            "accountContext": account_context,
+        }
+
+    def test_billing_aggregation_handles_currency_and_malformed_rows(self) -> None:
+        """Only valid daily usage contributes to statement-period totals."""
+        history = NESApiClient._aggregate_billing_history(
+            [
+                {"usageDate": "2026-07-01", "usageConsumptionValue": "12.5"},
+                {"usageDate": "2026-07-02", "usageConsumptionValue": "bad"},
+                {"usageDate": "bad", "usageConsumptionValue": 100},
+            ],
+            [
+                {"billingDate": "07/22/2026", "paymentAmount": "($1,234.56)"},
+                {"billingDate": "bad", "paymentAmount": "$99.00"},
+            ],
+        )
+
+        assert history[0]["billedConsumption"] == pytest.approx(12.5)
+        assert history[0]["billedCharge"] == pytest.approx(-1234.56)
 
     async def test_usage_rejects_response_without_history(self) -> None:
         """A changed or failed usage response is not mistaken for no usage."""

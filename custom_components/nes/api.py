@@ -100,8 +100,10 @@ class NESApiClient:
         self._customer_id: str | None = None
         self._guid: str | None = None
         self._account_number: str | int | None = None
+        self._account_context: dict[str, Any] | None = None
         self._service_id: str | int | None = None
         self._service_type: str | None = None
+        self._usage_service: dict[str, Any] | None = None
         self._payment_due_date: str | None = None
         self._token_lock = asyncio.Lock()
 
@@ -561,6 +563,8 @@ class NESApiClient:
                     service.get("serviceAddress") or service.get("address")
                 )
                 service_description = str(service.get("serviceDesc") or "").strip()
+                if not service_description:
+                    service_description = str(service.get("servDescr") or "").strip()
                 locations.append(
                     NESServiceLocation(
                         account_number=account_number,
@@ -636,12 +640,14 @@ class NESApiClient:
         if not isinstance(summary_type, dict):
             summary_type = {}
         self._account_number = account_context["accountNumber"]
+        self._account_context = account_context
         # Keep NES identifiers in their native JSON type. The original integration
         # passed serviceId through unchanged, and the portal does the same.
         self._service_id = selected_service["serviceId"]
         self._service_type = selected_service.get(
             "serviceType"
         ) or selected_service.get("serviceCat")
+        self._usage_service = selected_service
         self._payment_due_date = summary_type.get("paymentDueDate")
 
     async def async_get_customer(
@@ -699,6 +705,30 @@ class NESApiClient:
             LOGGER.warning("No serviceId available, cannot fetch usage")
             return []
 
+        if self._supports_detailed_usage():
+            return await self._async_get_detailed_usage()
+
+        return await self._async_get_legacy_usage()
+
+    def _supports_detailed_usage(self) -> bool:
+        """Return whether the selected service supports the current portal API."""
+        if not self._account_context or not self._usage_service:
+            return False
+        required_fields = (
+            "billDate",
+            "meterNumber",
+            "serviceContract",
+            "serviceId",
+            "serviceNumber",
+            "serviceType",
+        )
+        return all(
+            self._usage_service.get(field) is not None for field in required_fields
+        )
+
+    async def _async_get_legacy_usage(self) -> list[dict[str, Any]]:
+        """Fetch billed history from the original NES usage endpoint."""
+
         payload = {
             "customerId": self._customer_id,
             "accountContext": {
@@ -723,6 +753,142 @@ class NESApiClient:
                 self._payment_due_date is not None,
             )
         return [item for item in history if isinstance(item, dict)]
+
+    async def _async_get_detailed_usage(self) -> list[dict[str, Any]]:
+        """Build billed history from current daily usage and statement APIs."""
+        assert self._account_context is not None
+        assert self._usage_service is not None
+
+        end_date = dt_util.now().date() - timedelta(days=1)
+        start_date = (end_date - timedelta(days=400)).replace(day=1)
+        service = self._usage_service
+        detail_payload = {
+            "customerId": self._customer_id,
+            "fromDate": f"{start_date:%Y-%m-%d} 12:00",
+            "toDate": f"{end_date:%Y-%m-%d} 11:59",
+            "billDate": service["billDate"],
+            "meterNumber": service["meterNumber"],
+            "serviceNumber": service["serviceNumber"],
+            "serviceId": service["serviceId"],
+            "serviceType": service["serviceType"],
+            "accountContext": self._account_context,
+            "contractNum": service["serviceContract"],
+            "netContractNum": service.get("netContractNum"),
+        }
+        billing_payload = self._account_request(account_context=self._account_context)
+
+        detail_result, billing_result = await asyncio.gather(
+            self._async_post_json("/rest/usage/detail/month", detail_payload),
+            self._async_post_json("/rest/billing/history", billing_payload),
+        )
+        daily_history = detail_result.get("history")
+        if not isinstance(daily_history, list):
+            raise NESApiError(
+                "NES detailed usage response did not include a history list"
+            )
+        billing_history = billing_result.get("billingData")
+        if not isinstance(billing_history, list):
+            raise NESApiError("NES billing response did not include billingData")
+
+        return self._aggregate_billing_history(daily_history, billing_history)
+
+    @staticmethod
+    def _parse_usage_date(value: Any) -> datetime | None:
+        """Parse a daily usage date returned by NES."""
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_billing_date(value: Any) -> datetime | None:
+        """Parse a statement date returned by NES."""
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.strptime(value, "%m/%d/%Y")
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_currency(value: Any) -> float | None:
+        """Parse NES currency strings such as '$1,234.56'."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().replace("$", "").replace(",", "")
+        if normalized.startswith("(") and normalized.endswith(")"):
+            normalized = f"-{normalized[1:-1]}"
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _aggregate_billing_history(
+        cls,
+        daily_history: list[Any],
+        billing_history: list[Any],
+    ) -> list[dict[str, Any]]:
+        """Combine daily meter readings with statement dates and amounts."""
+        daily_values: list[tuple[datetime, float]] = []
+        for item in daily_history:
+            if not isinstance(item, dict):
+                continue
+            usage_date = cls._parse_usage_date(item.get("usageDate"))
+            usage_value = item.get("usageConsumptionValue")
+            if usage_date is None or usage_value is None:
+                continue
+            try:
+                daily_values.append((usage_date, float(usage_value)))
+            except (TypeError, ValueError):
+                continue
+
+        statements: list[tuple[datetime, dict[str, Any]]] = []
+        for item in billing_history:
+            if not isinstance(item, dict):
+                continue
+            billing_date = cls._parse_billing_date(item.get("billingDate"))
+            if billing_date is not None:
+                statements.append((billing_date, item))
+        statements.sort(key=lambda item: item[0])
+
+        if not statements:
+            return []
+
+        if len(statements) >= 2:
+            first_period_start = statements[0][0] - (
+                statements[1][0] - statements[0][0]
+            )
+        else:
+            first_period_start = statements[0][0] - timedelta(days=31)
+
+        result: list[dict[str, Any]] = []
+        for index, (billing_date, statement) in enumerate(statements):
+            period_start = statements[index - 1][0] if index else first_period_start
+            period_values = [
+                value
+                for usage_date, value in daily_values
+                if period_start <= usage_date < billing_date
+            ]
+            result.append(
+                {
+                    "chargeDate": billing_date.strftime("%b %Y"),
+                    "chargeDateRaw": billing_date.strftime("%d-%b-%Y"),
+                    "billStartDate": period_start.strftime("%Y-%m-%d"),
+                    "billEndDate": billing_date.strftime("%Y-%m-%d"),
+                    "billedConsumption": (
+                        round(sum(period_values), 4) if period_values else None
+                    ),
+                    "billedCharge": cls._parse_currency(statement.get("paymentAmount")),
+                    "daysOfService": (billing_date - period_start).days,
+                    "uom": "KWH",
+                }
+            )
+        return result
 
     async def async_get_rates(self) -> dict[str, Any]:
         """Fetch current residential rates from the public NES rates page."""

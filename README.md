@@ -59,7 +59,7 @@ The integration authenticates with NES through a multi-step flow:
 2. **NES JWT exchange** to create a server-side session
 3. **NES OAuth2** token grant with the SSO session
 
-Usage data and the public NES residential rate schedule are polled every **6 hours**. NES updates billing data and rates monthly, so more frequent polling is unnecessary.
+Usage data and the public NES residential rate schedule are polled every **6 hours**. For services shown in NES's current Usage Dashboard, the integration combines daily meter readings with statement history to preserve the billed monthly and yearly sensor values. Accounts that still expose the original billed-usage API continue using it as a fallback.
 
 ## Troubleshooting
 
