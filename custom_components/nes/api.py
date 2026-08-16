@@ -459,19 +459,54 @@ class NESApiClient:
         return result
 
     @staticmethod
-    def _services_from_response(result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Extract the service list from an NES account response."""
+    def _service_list_from_response(
+        result: dict[str, Any], key: str
+    ) -> list[dict[str, Any]]:
+        """Extract one service list from an NES account response."""
         account_summary = result.get("accountSummaryType")
         services = (
-            account_summary.get("services")
-            if isinstance(account_summary, dict)
-            else None
+            account_summary.get(key) if isinstance(account_summary, dict) else None
         )
         if services is None:
-            services = result.get("services")
+            services = result.get(key)
         if not isinstance(services, list):
             return []
         return [service for service in services if isinstance(service, dict)]
+
+    @classmethod
+    def _services_from_response(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Extract billing/display services from an NES account response."""
+        return cls._service_list_from_response(result, "services")
+
+    @classmethod
+    def _usage_services_from_response(
+        cls, result: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Extract meter-facing services used by the current Usage Dashboard."""
+        graph_services = cls._service_list_from_response(result, "servicesForGraph")
+        return graph_services or cls._services_from_response(result)
+
+    @staticmethod
+    def _service_matches_id(service: dict[str, Any], service_id: str | int) -> bool:
+        """Match current and legacy identifiers for an NES service."""
+        return any(
+            value is not None and str(value) == str(service_id)
+            for value in (
+                service.get("serviceId"),
+                service.get("serviceContract"),
+                service.get("contractNum"),
+            )
+        )
+
+    @staticmethod
+    def _preferred_usage_service(
+        services: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Select the first electric meter, matching the current NES portal."""
+        return next(
+            (service for service in services if service.get("serviceType") == "P"),
+            services[0] if services else None,
+        )
 
     @staticmethod
     def _format_service_address(value: Any) -> str:
@@ -515,7 +550,7 @@ class NESApiClient:
             account_address = self._format_service_address(
                 account.get("serviceAddress")
             )
-            for service in self._services_from_response(service_result):
+            for service in self._usage_services_from_response(service_result):
                 service_id = str(service.get("serviceId") or "").strip()
                 if not service_id:
                     continue
@@ -559,23 +594,41 @@ class NESApiClient:
             "/rest/account/services",
             self._account_request(account_context=account_context),
         )
-        services = [
+        display_services = [
             service
             for service in self._services_from_response(service_result)
+            if service.get("serviceId") is not None
+        ]
+        usage_services = [
+            service
+            for service in self._usage_services_from_response(service_result)
             if service.get("serviceId") is not None
         ]
 
         selected_service = next(
             (
                 service
-                for service in services
+                for service in usage_services
                 if service_id is not None
-                and str(service.get("serviceId")) == str(service_id)
+                and self._service_matches_id(service, service_id)
             ),
             None,
         )
-        if selected_service is None and service_id is None and services:
-            selected_service = services[0]
+        if selected_service is None and service_id is None:
+            selected_service = self._preferred_usage_service(usage_services)
+        if (
+            selected_service is None
+            and service_id is not None
+            and usage_services != display_services
+            and any(
+                self._service_matches_id(service, service_id)
+                for service in display_services
+            )
+        ):
+            # Entries created before graph services were used store the ID of the
+            # billing/display service. Map those entries to the meter service so
+            # users do not have to delete and recreate their configuration.
+            selected_service = self._preferred_usage_service(usage_services)
         if selected_service is None:
             raise NESApiError("Selected NES service is no longer available")
 

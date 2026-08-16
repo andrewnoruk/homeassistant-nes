@@ -203,6 +203,104 @@ class TestServiceLocations:
         assert client._service_type == "Lighting"
         assert client._payment_due_date == "2026-08-21"
 
+    async def test_discovers_meter_facing_graph_service(self) -> None:
+        """Current Usage Dashboard services take precedence over display rows."""
+        account_list = _make_response(
+            200,
+            {
+                "account": [
+                    {
+                        "accountNumber": "7013678056",
+                        "serviceAddress": "123 Main St",
+                    }
+                ]
+            },
+        )
+        services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [
+                        {
+                            "serviceId": "contract-1",
+                            "serviceType": "Electric Residential, Active",
+                        }
+                    ],
+                    "servicesForGraph": [
+                        {
+                            "serviceId": "meter-service-1",
+                            "serviceContract": "contract-1",
+                            "serviceType": "P",
+                            "serviceDesc": "Electric",
+                        }
+                    ],
+                }
+            },
+        )
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[_make_ctx(account_list), _make_ctx(services)]
+        )
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._customer_id = "105112"
+
+        locations = await client.async_get_service_locations()
+
+        assert locations == [
+            NESServiceLocation(
+                "7013678056", "meter-service-1", "P", "123 Main St", "Electric"
+            )
+        ]
+
+    async def test_legacy_display_service_maps_to_graph_service(self) -> None:
+        """An existing entry is upgraded to the meter-facing service at runtime."""
+        summary = _make_response(
+            200,
+            {
+                "accountContext": {"accountNumber": "7013678056"},
+                "accountSummaryType": {"paymentDueDate": "2026-08-21"},
+            },
+        )
+        services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [
+                        {
+                            "serviceId": "contract-1",
+                            "serviceType": "Electric Residential, Active",
+                        }
+                    ],
+                    "servicesForGraph": [
+                        {
+                            "serviceId": "meter-service-1",
+                            "serviceContract": "contract-1",
+                            "serviceType": "P",
+                        }
+                    ],
+                }
+            },
+        )
+        usage = _make_response(
+            200,
+            {"history": [{"billedConsumption": "900", "billedCharge": "120"}]},
+        )
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[_make_ctx(summary), _make_ctx(services), _make_ctx(usage)]
+        )
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._customer_id = "105112"
+
+        await client.async_select_service("7013678056", "contract-1")
+        await client.async_get_usage()
+
+        usage_context = session.post.call_args_list[2].kwargs["json"]["accountContext"]
+        assert usage_context["serviceId"] == "meter-service-1"
+        assert usage_context["serviceType"] == "P"
+
     async def test_selected_account_context_and_id_types_reach_usage(self) -> None:
         """Linked-account routing context and native IDs reach the usage API."""
         summary = _make_response(
