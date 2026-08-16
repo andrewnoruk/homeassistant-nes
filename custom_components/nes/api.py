@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
@@ -24,8 +26,11 @@ from .const import (
     B2C_SCOPE,
     B2C_SELF_ASSERTED_URL,
     B2C_TOKEN_URL,
+    BROWSER_USER_AGENT,
     LOGGER,
+    RATES_URL,
 )
+from .rates import parse_rates_page
 
 
 class NESAuthError(Exception):
@@ -45,6 +50,37 @@ class NESApiError(Exception):
     """General API error."""
 
 
+@dataclass(frozen=True, slots=True)
+class NESServiceLocation:
+    """A selectable NES account service location."""
+
+    account_number: str
+    service_id: str
+    service_type: str
+    service_address: str
+    service_description: str = ""
+
+    @property
+    def unique_id(self) -> str:
+        """Return a stable identifier for this service location."""
+        return f"{self.account_number}:{self.service_id}"
+
+    @property
+    def display_name(self) -> str:
+        """Return a human-readable config-flow label."""
+        account_label = f"Account ••••{self.account_number[-4:]}"
+        if self.service_address:
+            label = f"{self.service_address} — {account_label}"
+            if self.service_description:
+                return f"{label} — {self.service_description}"
+            return label
+        if self.service_description:
+            return f"{account_label} — {self.service_description}"
+        if self.service_type:
+            return f"{account_label} — {self.service_type}"
+        return account_label
+
+
 class NESApiClient:
     """Async client for the NES customer portal API."""
 
@@ -62,6 +98,7 @@ class NESApiClient:
         self._refresh_token: str | None = None
         self._token_expiry: datetime | None = None
         self._customer_id: str | None = None
+        self._guid: str | None = None
         self._account_number: str | None = None
         self._service_id: str | None = None
         self._service_type: str | None = None
@@ -94,10 +131,7 @@ class NESApiClient:
             # The id_token is short-lived and single-use.
             jwt_url = f"{API_BASE_URL}/rest/auth/jwt?id_token={id_token}"
             browser_headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": BROWSER_USER_AGENT,
             }
 
             async with self._session.get(
@@ -146,6 +180,7 @@ class NESApiClient:
                 self._refresh_token = result.get("refresh_token")
                 expires_in = result.get("expires_in", 3600)
                 self._token_expiry = dt_util.utcnow() + timedelta(seconds=expires_in)
+                self._update_identity_from_token()
                 LOGGER.debug("Successfully authenticated with NES")
 
         except aiohttp.ClientError as err:
@@ -331,6 +366,7 @@ class NESApiClient:
                 self._refresh_token = result.get("refresh_token", self._refresh_token)
                 expires_in = result.get("expires_in", 3600)
                 self._token_expiry = dt_util.utcnow() + timedelta(seconds=expires_in)
+                self._update_identity_from_token()
                 LOGGER.debug("Successfully refreshed token")
 
         except aiohttp.ClientError:
@@ -353,13 +389,191 @@ class NESApiClient:
         return {
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": BROWSER_USER_AGENT,
         }
 
-    async def async_get_customer(self) -> dict[str, Any]:
+    def _update_identity_from_token(self) -> None:
+        """Populate the customer identity embedded in the NES access token."""
+        if not self._access_token:
+            return
+
+        try:
+            encoded_payload = self._access_token.split(".")[1]
+            encoded_payload += "=" * (-len(encoded_payload) % 4)
+            token_payload = json.loads(
+                base64.urlsafe_b64decode(encoded_payload).decode()
+            )
+        except (IndexError, UnicodeDecodeError, ValueError):
+            LOGGER.debug("Unable to decode NES access token identity")
+            return
+
+        token_user = token_payload.get("user", {})
+        if not isinstance(token_user, dict):
+            return
+        self._customer_id = token_user.get("customerId", self._customer_id)
+        self._guid = token_user.get("guid", self._guid)
+
+    def _account_request(self, account_number: str | None = None) -> dict[str, Any]:
+        """Build the account request shape used by the NES portal."""
+        request: dict[str, Any] = {"customerId": self._customer_id}
+        if self._guid:
+            request["guid"] = self._guid
+        if account_number is not None:
+            request["accountContext"] = {"accountNumber": account_number}
+        return request
+
+    async def _async_post_json(
+        self, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Post to an authenticated NES endpoint and return its JSON object."""
+        await self._async_ensure_token()
+        url = f"{API_BASE_URL}{path}"
+
+        try:
+            async with self._session.post(
+                url, headers=self._auth_headers(), json=payload
+            ) as resp:
+                if resp.status != 401:
+                    self._verify_response(resp)
+                    result = await resp.json()
+                else:
+                    await self.async_authenticate()
+                    async with self._session.post(
+                        url, headers=self._auth_headers(), json=payload
+                    ) as retry_resp:
+                        self._verify_response(retry_resp)
+                        result = await retry_resp.json()
+        except aiohttp.ClientError as err:
+            raise NESConnectionError(
+                f"Connection error calling NES endpoint {path}: {err}"
+            ) from err
+
+        if not isinstance(result, dict):
+            raise NESApiError(f"Invalid response from NES endpoint {path}")
+        return result
+
+    @staticmethod
+    def _services_from_response(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Extract the service list from an NES account response."""
+        account_summary = result.get("accountSummaryType")
+        services = (
+            account_summary.get("services")
+            if isinstance(account_summary, dict)
+            else None
+        )
+        if services is None:
+            services = result.get("services")
+        if not isinstance(services, list):
+            return []
+        return [service for service in services if isinstance(service, dict)]
+
+    @staticmethod
+    def _format_service_address(value: Any) -> str:
+        """Normalize NES string or structured service addresses for display."""
+        if isinstance(value, str):
+            return " ".join(value.split())
+        if not isinstance(value, dict):
+            return ""
+
+        lines = [
+            value.get("addressLine1"),
+            value.get("addressLine2"),
+            value.get("city"),
+            value.get("state"),
+            value.get("zip") or value.get("zipCode"),
+        ]
+        return ", ".join(str(part).strip() for part in lines if part)
+
+    async def async_get_service_locations(self) -> list[NESServiceLocation]:
+        """Return every usage service available to the authenticated login."""
+        result = await self._async_post_json(
+            "/rest/account/list",
+            {**self._account_request(), "multiAcctLimit": 10},
+        )
+        accounts = result.get("account") or result.get("accounts") or []
+        if not isinstance(accounts, list):
+            return []
+        locations: list[NESServiceLocation] = []
+
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            account_number = str(account.get("accountNumber") or "").strip()
+            if not account_number:
+                continue
+
+            service_result = await self._async_post_json(
+                "/rest/account/services",
+                self._account_request(account_number),
+            )
+            account_address = self._format_service_address(
+                account.get("serviceAddress")
+            )
+            for service in self._services_from_response(service_result):
+                service_id = str(service.get("serviceId") or "").strip()
+                if not service_id:
+                    continue
+                service_type = str(
+                    service.get("serviceType") or service.get("serviceCat") or ""
+                ).strip()
+                service_address = self._format_service_address(
+                    service.get("serviceAddress") or service.get("address")
+                )
+                service_description = str(service.get("serviceDesc") or "").strip()
+                locations.append(
+                    NESServiceLocation(
+                        account_number=account_number,
+                        service_id=service_id,
+                        service_type=service_type,
+                        service_address=service_address or account_address,
+                        service_description=service_description,
+                    )
+                )
+
+        return locations
+
+    async def async_select_service(
+        self, account_number: str, service_id: str | None = None
+    ) -> None:
+        """Load and select one account service for subsequent usage calls."""
+        request = self._account_request(account_number)
+        summary = await self._async_post_json("/rest/account/summary", request)
+        service_result = await self._async_post_json("/rest/account/services", request)
+        services = [
+            service
+            for service in self._services_from_response(service_result)
+            if service.get("serviceId") is not None
+        ]
+
+        selected_service = next(
+            (
+                service
+                for service in services
+                if service_id is not None
+                and str(service.get("serviceId")) == str(service_id)
+            ),
+            None,
+        )
+        if selected_service is None and service_id is None and services:
+            selected_service = services[0]
+        if selected_service is None:
+            raise NESApiError("Selected NES service is no longer available")
+
+        summary_type = summary.get("accountSummaryType")
+        if not isinstance(summary_type, dict):
+            summary_type = {}
+        self._account_number = account_number
+        self._service_id = str(selected_service.get("serviceId"))
+        self._service_type = selected_service.get(
+            "serviceType"
+        ) or selected_service.get("serviceCat")
+        self._payment_due_date = summary_type.get("paymentDueDate")
+
+    async def async_get_customer(
+        self,
+        account_number: str | None = None,
+        service_id: str | None = None,
+    ) -> dict[str, Any]:
         """Fetch customer and service information.
 
         Calls three endpoints to build the full account context:
@@ -387,52 +601,15 @@ class NESApiClient:
                     self._verify_response(resp)
                     result = await resp.json()
 
-            self._customer_id = result.get("accountContext", {}).get(
-                "userID"
-            ) or result.get("customerId")
+            if not self._customer_id:
+                self._customer_id = result.get("customerId") or result.get(
+                    "accountContext", {}
+                ).get("userID")
             acct_ctx = result.get("accountContext", {})
-            acct_num = acct_ctx.get("accountNumber")
-            self._account_number = acct_num
-
-            # 2. Get account summary for paymentDueDate
-            req = {
-                "customerId": self._customer_id,
-                "accountContext": {"accountNumber": acct_num},
-            }
-            async with self._session.post(
-                f"{API_BASE_URL}/rest/account/summary",
-                headers=self._auth_headers(),
-                json=req,
-            ) as resp:
-                self._verify_response(resp)
-                summary = await resp.json()
-                summary_type = summary.get("accountSummaryType", {})
-                self._payment_due_date = summary_type.get("paymentDueDate")
-
-            # 3. Get services for serviceId and serviceType
-            async with self._session.post(
-                f"{API_BASE_URL}/rest/account/services",
-                headers=self._auth_headers(),
-                json=req,
-            ) as resp:
-                self._verify_response(resp)
-                svc_data = await resp.json()
-                services = svc_data.get("accountSummaryType", {}).get("services") or []
-                if services:
-                    svc = services[0]
-                    self._service_id = svc.get("serviceId")
-                    self._service_type = svc.get("serviceType")
-                else:
-                    self._service_id = None
-                    self._service_type = None
-
-            # Use customerId from the token (numeric ID)
-            token_payload = self._access_token.split(".")[1] + "=="
-            import base64 as b64
-            import json as json_mod
-
-            token_user = json_mod.loads(b64.b64decode(token_payload)).get("user", {})
-            self._customer_id = token_user.get("customerId", self._customer_id)
+            selected_account = account_number or acct_ctx.get("accountNumber")
+            if not selected_account:
+                raise NESApiError("NES response did not include an account number")
+            await self.async_select_service(str(selected_account), service_id)
 
             return result
 
@@ -484,6 +661,29 @@ class NESApiClient:
             raise NESConnectionError(
                 f"Connection error fetching usage data: {err}"
             ) from err
+
+    async def async_get_rates(self) -> dict[str, Any]:
+        """Fetch current residential rates from the public NES rates page."""
+        try:
+            async with self._session.get(
+                RATES_URL,
+                headers={"User-Agent": BROWSER_USER_AGENT},
+            ) as resp:
+                if resp.status >= 400:
+                    raise NESApiError(f"Rates page error: HTTP {resp.status}")
+                page_html = await resp.text()
+        except (TimeoutError, aiohttp.ClientError) as err:
+            raise NESConnectionError(
+                f"Connection error fetching NES rates: {err}"
+            ) from err
+
+        try:
+            rates = parse_rates_page(page_html)
+        except ValueError as err:
+            raise NESApiError(f"Unable to parse NES rates: {err}") from err
+
+        rates["source_url"] = RATES_URL
+        return rates
 
     @staticmethod
     def _verify_response(resp: aiohttp.ClientResponse) -> None:

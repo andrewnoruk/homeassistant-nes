@@ -40,7 +40,7 @@ class TestSensorDescriptions:
     """Test sensor entity descriptions are correct."""
 
     def test_correct_number_of_sensors(self) -> None:
-        assert len(SENSOR_DESCRIPTIONS) == 4
+        assert len(SENSOR_DESCRIPTIONS) == 9
 
     def test_monthly_energy_is_energy_dashboard_compatible(self) -> None:
         monthly = next(
@@ -75,6 +75,18 @@ class TestSensorValues:
             },
             "total_kwh": 1695.0,
             "total_cost": 277.69,
+            "rates": {
+                "base_rate": 0.09254,
+                "fuel_cost_adjustment": 0.02610,
+                "variable_rate": 0.11864,
+                "effective_month": "August 2026",
+                "source_url": "https://www.nespower.com/rates/",
+                "service_charge": 16.96,
+                "service_charge_tier": 2,
+                "grid_access_charge": 7.33,
+                "grid_access_charge_tier": 2,
+                "average_monthly_kwh": 565.0,
+            },
         }
 
     def test_monthly_energy_value(self) -> None:
@@ -97,8 +109,49 @@ class TestSensorValues:
         desc = next(s for s in SENSOR_DESCRIPTIONS if s.key == "yearly_energy_cost")
         assert desc.value_fn(data) == pytest.approx(277.69)
 
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            ("variable_energy_rate", 0.11864),
+            ("base_energy_rate", 0.09254),
+            ("fuel_cost_adjustment", 0.02610),
+            ("monthly_service_charge", 16.96),
+            ("monthly_grid_access_charge", 7.33),
+        ],
+    )
+    def test_rate_values(self, key: str, expected: float) -> None:
+        data = self._make_data()
+        desc = next(sensor for sensor in SENSOR_DESCRIPTIONS if sensor.key == key)
+        assert desc.value_fn(data) == pytest.approx(expected)
+
+    def test_fixed_charge_attributes_explain_tier_selection(self) -> None:
+        data = self._make_data()
+        service = next(
+            sensor
+            for sensor in SENSOR_DESCRIPTIONS
+            if sensor.key == "monthly_service_charge"
+        )
+        grid = next(
+            sensor
+            for sensor in SENSOR_DESCRIPTIONS
+            if sensor.key == "monthly_grid_access_charge"
+        )
+
+        assert service.attribute_fn is not None
+        assert service.attribute_fn(data)["service_charge_tier"] == 2
+        assert service.attribute_fn(data)["average_monthly_kwh"] == 565.0
+        assert grid.attribute_fn is not None
+        assert grid.attribute_fn(data)["grid_access_charge_tier"] == 2
+        assert grid.attribute_fn(data)["average_monthly_kwh"] == 565.0
+
     def test_values_with_none_data(self) -> None:
-        data = {"monthly": [], "latest": {}, "total_kwh": 0.0, "total_cost": 0.0}
+        data = {
+            "monthly": [],
+            "latest": {},
+            "total_kwh": 0.0,
+            "total_cost": 0.0,
+            "rates": {},
+        }
         for desc in SENSOR_DESCRIPTIONS:
             value = desc.value_fn(data)
             assert value is None or isinstance(value, float)

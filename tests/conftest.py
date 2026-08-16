@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.nes.api import NESServiceLocation
+
 
 @pytest.fixture
 def mock_setup_entry() -> Generator[AsyncMock]:
@@ -35,6 +37,16 @@ def mock_nes_client() -> Generator[MagicMock]:
                 },
                 "accountSummaryType": {},
             }
+        )
+        client.async_get_service_locations = AsyncMock(
+            return_value=[
+                NESServiceLocation(
+                    account_number="7013678056",
+                    service_id="service-1",
+                    service_type="Electric",
+                    service_address="123 Main St, Nashville, TN 37201",
+                )
+            ]
         )
         client.async_get_usage = AsyncMock(return_value=MOCK_USAGE_DATA)
         client.customer_id = "105112"
@@ -82,3 +94,27 @@ MOCK_USAGE_DATA = [
         "temp": 65,
     },
 ]
+
+MOCK_RATE_DATA = {
+    "base_rate": 0.09254,
+    "fuel_cost_adjustment": 0.02610,
+    "variable_rate": 0.11864,
+    "effective_month": "August 2026",
+    "source_url": "https://www.nespower.com/rates/",
+    "base_rate_url": "https://www.nespower.com/residential.pdf",
+    "fuel_adjustment_url": "https://www.nespower.com/fuel-august-2026.pdf",
+    "service_charge_tiers": [
+        {"tier": 1, "max_kwh": 500.0, "charge": 12.06},
+        {"tier": 2, "max_kwh": 2000.0, "charge": 16.96},
+        {"tier": 3, "max_kwh": 4000.0, "charge": 24.96},
+        {"tier": 4, "max_kwh": 6000.0, "charge": 30.66},
+        {"tier": 5, "max_kwh": None, "charge": 36.70},
+    ],
+    "grid_access_charge_tiers": [
+        {"tier": 1, "max_kwh": 500.0, "charge": 4.50},
+        {"tier": 2, "max_kwh": 2000.0, "charge": 7.33},
+        {"tier": 3, "max_kwh": 4000.0, "charge": 7.33},
+        {"tier": 4, "max_kwh": 6000.0, "charge": 7.88},
+        {"tier": 5, "max_kwh": None, "charge": 7.88},
+    ],
+}

@@ -20,6 +20,7 @@ class NESEntity(CoordinatorEntity[NESDataUpdateCoordinator]):
         self,
         coordinator: NESDataUpdateCoordinator,
         entry_id: str,
+        entry_title: str = "NES Account",
     ) -> None:
         """Initialize the entity."""
         super().__init__(coordinator)
@@ -27,5 +28,5 @@ class NESEntity(CoordinatorEntity[NESDataUpdateCoordinator]):
             entry_type=DeviceEntryType.SERVICE,
             identifiers={(DOMAIN, entry_id)},
             manufacturer="Nashville Electric Service",
-            name="NES Account",
+            name=entry_title,
         )

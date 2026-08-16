@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
@@ -11,6 +11,8 @@ from custom_components.nes.api import (
     NESApiClient,
     NESApiError,
     NESAuthError,
+    NESConnectionError,
+    NESServiceLocation,
 )
 
 
@@ -89,6 +91,138 @@ class TestTokenRefresh:
         assert client._refresh_token == "new-refresh"
 
 
+class TestServiceLocations:
+    """Test linked account and service discovery."""
+
+    async def test_discovers_services_for_every_linked_account(self) -> None:
+        """Account list entries are flattened into selectable services."""
+        account_list = _make_response(
+            200,
+            {
+                "account": [
+                    {
+                        "accountNumber": "7013678056",
+                        "serviceAddress": "123 Main St",
+                    },
+                    {
+                        "accountNumber": "7013672147",
+                        "serviceAddress": "456 Oak Ave",
+                    },
+                ]
+            },
+        )
+        first_services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [{"serviceId": "service-1", "serviceType": "Electric"}]
+                }
+            },
+        )
+        second_services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [
+                        {
+                            "serviceId": "service-2",
+                            "serviceType": "Electric",
+                            "serviceDesc": "Residential Electric",
+                            "serviceAddress": {
+                                "addressLine1": "456 Oak Ave",
+                                "city": "Nashville",
+                                "state": "TN",
+                                "zip": "37201",
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[
+                _make_ctx(account_list),
+                _make_ctx(first_services),
+                _make_ctx(second_services),
+            ]
+        )
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._customer_id = "105112"
+
+        locations = await client.async_get_service_locations()
+
+        assert locations == [
+            NESServiceLocation("7013678056", "service-1", "Electric", "123 Main St"),
+            NESServiceLocation(
+                "7013672147",
+                "service-2",
+                "Electric",
+                "456 Oak Ave, Nashville, TN, 37201",
+                "Residential Electric",
+            ),
+        ]
+        assert locations[1].display_name.endswith("Residential Electric")
+        assert session.post.call_args_list[0].args[0].endswith("/rest/account/list")
+        assert session.post.call_args_list[1].kwargs["json"] == {
+            "customerId": "105112",
+            "accountContext": {"accountNumber": "7013678056"},
+        }
+        assert session.post.call_args_list[2].kwargs["json"] == {
+            "customerId": "105112",
+            "accountContext": {"accountNumber": "7013672147"},
+        }
+
+    async def test_select_service_uses_requested_service_not_first(self) -> None:
+        """Explicit selection is retained when an account has several services."""
+        summary = _make_response(
+            200, {"accountSummaryType": {"paymentDueDate": "2026-08-21"}}
+        )
+        services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [
+                        {"serviceId": "service-1", "serviceType": "Electric"},
+                        {"serviceId": "service-2", "serviceType": "Lighting"},
+                    ]
+                }
+            },
+        )
+        session = MagicMock()
+        session.post = MagicMock(side_effect=[_make_ctx(summary), _make_ctx(services)])
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+        client._customer_id = "105112"
+
+        await client.async_select_service("7013678056", "service-2")
+
+        assert client._account_number == "7013678056"
+        assert client._service_id == "service-2"
+        assert client._service_type == "Lighting"
+        assert client._payment_due_date == "2026-08-21"
+
+    async def test_select_service_rejects_stale_selection(self) -> None:
+        """A removed service cannot silently fall back to the first service."""
+        summary = _make_response(200, {"accountSummaryType": {}})
+        services = _make_response(
+            200,
+            {
+                "accountSummaryType": {
+                    "services": [{"serviceId": "service-1", "serviceType": "Electric"}]
+                }
+            },
+        )
+        session = MagicMock()
+        session.post = MagicMock(side_effect=[_make_ctx(summary), _make_ctx(services)])
+        client = NESApiClient("user@example.com", "pass", session)
+        client._access_token = "token"
+
+        with pytest.raises(NESApiError, match="no longer available"):
+            await client.async_select_service("7013678056", "missing")
+
+
 class TestVerifyResponse:
     """Test response verification."""
 
@@ -114,3 +248,32 @@ class TestVerifyResponse:
         resp = MagicMock()
         resp.status = 200
         NESApiClient._verify_response(resp)  # Should not raise
+
+
+class TestRates:
+    """Test public residential rate retrieval."""
+
+    async def test_get_rates_does_not_require_account_token(self) -> None:
+        """Test public rates can be fetched independently of authentication."""
+        rates_resp = _make_response(200, text="<html>rates</html>")
+        session = MagicMock()
+        session.get = MagicMock(return_value=_make_ctx(rates_resp))
+        client = NESApiClient("user@example.com", "pass", session)
+
+        with patch(
+            "custom_components.nes.api.parse_rates_page",
+            return_value={"variable_rate": 0.11864},
+        ):
+            rates = await client.async_get_rates()
+
+        assert rates["variable_rate"] == pytest.approx(0.11864)
+        assert rates["source_url"] == "https://www.nespower.com/rates/"
+
+    async def test_get_rates_wraps_timeout(self) -> None:
+        """Test a public page timeout is a non-auth connection error."""
+        session = MagicMock()
+        session.get = MagicMock(side_effect=TimeoutError)
+        client = NESApiClient("user@example.com", "pass", session)
+
+        with pytest.raises(NESConnectionError):
+            await client.async_get_rates()

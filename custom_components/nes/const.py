@@ -5,7 +5,17 @@ import logging
 DOMAIN = "nes"
 LOGGER = logging.getLogger(__package__)
 
+CONF_ACCOUNT_NUMBER = "account_number"
+CONF_SERVICE_ADDRESS = "service_address"
+CONF_SERVICE_ID = "service_id"
+CONF_SERVICE_LOCATION = "service_location"
+CONF_SERVICE_TYPE = "service_type"
+
 ATTRIBUTION = "Data provided by Nashville Electric Service"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 # Azure AD B2C configuration
 B2C_TENANT = "pdnesb2c"
@@ -25,6 +35,7 @@ B2C_CONFIRMED_URL = f"{B2C_BASE_URL}/api/CombinedSigninAndSignup/confirmed"
 # NES API
 API_BASE_URL = "https://myaccount.nespower.com"
 API_ENDPOINT_CUSTOMER = "/rest/account/customer/"
+RATES_URL = "https://www.nespower.com/rates/"
 
 # Polling interval (seconds)
 UPDATE_INTERVAL_HOURS = 6

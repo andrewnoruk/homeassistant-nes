@@ -2,10 +2,12 @@
 
 Thanks for your interest in contributing! This is a custom Home Assistant integration for Nashville Electric Service (NES).
 
+This repository is a maintained fork of [maxbeizer/homeassistant-nes](https://github.com/maxbeizer/homeassistant-nes). Contributions and issue reports for the fork should target this repository.
+
 ## Development Setup
 
 ```bash
-git clone https://github.com/maxbeizer/homeassistant-nes.git
+git clone https://github.com/andrewnoruk/homeassistant-nes.git
 cd homeassistant-nes
 python3 -m venv .venv
 source .venv/bin/activate
@@ -34,7 +36,8 @@ The integration follows standard Home Assistant patterns:
 | `api.py` | NES API client — B2C auth + OAuth2 SSO + REST API |
 | `config_flow.py` | UI setup flow (email/password) |
 | `coordinator.py` | `DataUpdateCoordinator` — polls every 6 hours |
-| `sensor.py` | Sensor entities (monthly/yearly usage and cost) |
+| `sensor.py` | Sensor entities (usage, cost, and current residential rates) |
+| `rates.py` | Parser for the public NES residential rate schedule |
 | `entity.py` | Base `CoordinatorEntity` with device info |
 | `data.py` | Typed runtime data |
 | `const.py` | Constants (domain, URLs, logger) |

@@ -3,11 +3,22 @@
     "step": {
       "user": {
         "title": "Nashville Electric Service",
-        "description": "Enter your NES customer portal credentials (myaccount.nespower.com).",
+        "description": "Enter your NES customer portal credentials (myaccount.nespower.com). Linked service addresses will be discovered after you sign in.",
         "data": {
           "username": "Email",
           "password": "Password"
         }
+      },
+      "account": {
+        "title": "Select an NES service address",
+        "description": "Choose the account and service address whose usage data should be added to Home Assistant. You can run setup again to add another address.",
+        "data": {
+          "service_location": "Service address"
+        }
+      },
+      "reconfigure": {
+        "title": "Rediscover NES service addresses",
+        "description": "Home Assistant could not retrieve the service addresses. Submit to try again."
       },
       "reauth_confirm": {
         "title": "Re-authenticate with NES",
@@ -21,10 +32,14 @@
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Unable to connect to NES. Please try again later.",
+      "no_service_locations": "No electric services were found for this NES login.",
+      "account_unavailable": "The selected NES account or service address is no longer available to this login.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This NES account is already configured."
+      "already_configured": "This NES service address is already configured.",
+      "no_service_locations": "No electric services were found for this NES login.",
+      "reconfigure_successful": "The NES service address was updated successfully."
     }
   },
   "entity": {
@@ -40,6 +55,21 @@
       },
       "yearly_energy_cost": {
         "name": "Yearly energy cost"
+      },
+      "variable_energy_rate": {
+        "name": "Variable energy rate"
+      },
+      "base_energy_rate": {
+        "name": "Base energy rate"
+      },
+      "fuel_cost_adjustment": {
+        "name": "Fuel cost adjustment"
+      },
+      "monthly_service_charge": {
+        "name": "Monthly service charge"
+      },
+      "monthly_grid_access_charge": {
+        "name": "Monthly grid access charge"
       }
     }
   }
