@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import NESApiClient, NESApiError, NESAuthError, NESConnectionError
 from .const import LOGGER, UPDATE_INTERVAL_HOURS
@@ -78,6 +79,41 @@ def _enrich_rates(
     return result
 
 
+def _usage_period(
+    daily_usage: list[dict[str, Any]] | None,
+    period_start: date,
+    period_end: date,
+) -> dict[str, Any]:
+    """Aggregate normalized daily readings over an inclusive calendar period."""
+    result: dict[str, Any] = {
+        "usage_kwh": None,
+        "period_start": period_start.isoformat(),
+        "first_reading_date": None,
+        "data_through": None,
+        "readings_count": 0,
+    }
+    if daily_usage is None:
+        return result
+
+    readings: list[tuple[date, float]] = []
+    for item in daily_usage:
+        try:
+            usage_date = date.fromisoformat(str(item.get("usageDate")))
+            usage_value = float(item["usageConsumptionValue"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if period_start <= usage_date <= period_end:
+            readings.append((usage_date, usage_value))
+
+    result["usage_kwh"] = round(sum(value for _, value in readings), 4)
+    result["readings_count"] = len(readings)
+    if readings:
+        dates = [usage_date for usage_date, _ in readings]
+        result["first_reading_date"] = min(dates).isoformat()
+        result["data_through"] = max(dates).isoformat()
+    return result
+
+
 class NESDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator to manage fetching NES usage data."""
 
@@ -124,10 +160,19 @@ class NESDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         total_cost = sum(_safe_float_or_zero(m.get("billedCharge")) for m in usage_data)
 
+        daily_usage = self.client.daily_usage
+        if not isinstance(daily_usage, list):
+            daily_usage = None
+        today = dt_util.now().date()
+        month_to_date = _usage_period(daily_usage, today.replace(day=1), today)
+        year_to_date = _usage_period(daily_usage, today.replace(month=1, day=1), today)
+
         return {
             "monthly": usage_data,
             "latest": latest,
             "total_kwh": round(total_kwh, 2),
             "total_cost": round(total_cost, 2),
+            "month_to_date": month_to_date,
+            "year_to_date": year_to_date,
             "rates": _enrich_rates(rates, usage_data),
         }

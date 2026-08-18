@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,7 +17,11 @@ from custom_components.nes.api import (
     NESAuthError,
     NESConnectionError,
 )
-from custom_components.nes.coordinator import NESDataUpdateCoordinator, _enrich_rates
+from custom_components.nes.coordinator import (
+    NESDataUpdateCoordinator,
+    _enrich_rates,
+    _usage_period,
+)
 
 
 async def test_coordinator_successful_update(hass: HomeAssistant) -> None:
@@ -24,9 +29,23 @@ async def test_coordinator_successful_update(hass: HomeAssistant) -> None:
     client = MagicMock(spec=NESApiClient)
     client.async_get_usage = AsyncMock(return_value=MOCK_USAGE_DATA)
     client.async_get_rates = AsyncMock(return_value=MOCK_RATE_DATA)
+    client.daily_usage = [
+        {"usageDate": "2025-12-31", "usageConsumptionValue": 99},
+        {"usageDate": "2026-01-01", "usageConsumptionValue": 10},
+        {"usageDate": "2026-07-31", "usageConsumptionValue": 20},
+        {"usageDate": "2026-08-01", "usageConsumptionValue": 30},
+        {"usageDate": "2026-08-15", "usageConsumptionValue": 40},
+        {"usageDate": "2026-08-16", "usageConsumptionValue": 50},
+        {"usageDate": "2026-08-18", "usageConsumptionValue": 100},
+    ]
 
     coordinator = NESDataUpdateCoordinator(hass, client)
-    data = await coordinator._async_update_data()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "custom_components.nes.coordinator.dt_util.now",
+            lambda: datetime(2026, 8, 17, 12, 0),
+        )
+        data = await coordinator._async_update_data()
 
     assert len(data["monthly"]) == 3
     assert data["latest"]["chargeDate"] == "Apr 2026"
@@ -37,6 +56,20 @@ async def test_coordinator_successful_update(hass: HomeAssistant) -> None:
     assert data["rates"]["service_charge_tier"] == 2
     assert data["rates"]["grid_access_charge"] == pytest.approx(7.33)
     assert data["rates"]["grid_access_charge_tier"] == 2
+    assert data["month_to_date"] == {
+        "usage_kwh": 120.0,
+        "period_start": "2026-08-01",
+        "first_reading_date": "2026-08-01",
+        "data_through": "2026-08-16",
+        "readings_count": 3,
+    }
+    assert data["year_to_date"] == {
+        "usage_kwh": 150.0,
+        "period_start": "2026-01-01",
+        "first_reading_date": "2026-01-01",
+        "data_through": "2026-08-16",
+        "readings_count": 5,
+    }
 
 
 async def test_coordinator_empty_data(hass: HomeAssistant) -> None:
@@ -127,3 +160,18 @@ def test_rate_tiers_use_average_of_latest_twelve_bills() -> None:
     assert rates["average_monthly_kwh"] == pytest.approx(100.0)
     assert rates["service_charge"] == pytest.approx(12.06)
     assert rates["grid_access_charge"] == pytest.approx(4.50)
+
+
+def test_usage_period_distinguishes_unsupported_from_no_current_readings() -> None:
+    """Legacy data is unavailable while a supported empty period totals zero."""
+    unsupported = _usage_period(None, date(2026, 8, 1), date(2026, 8, 17))
+    supported = _usage_period(
+        [{"usageDate": "2026-07-31", "usageConsumptionValue": 12}],
+        date(2026, 8, 1),
+        date(2026, 8, 17),
+    )
+
+    assert unsupported["usage_kwh"] is None
+    assert supported["usage_kwh"] == 0.0
+    assert supported["readings_count"] == 0
+    assert supported["data_through"] is None

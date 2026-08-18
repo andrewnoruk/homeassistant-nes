@@ -64,6 +64,21 @@ def _grid_charge_attributes(data: dict[str, Any]) -> dict[str, Any]:
     return attributes
 
 
+def _usage_period_attributes(data: dict[str, Any], period_key: str) -> dict[str, Any]:
+    """Return calendar-period coverage details for a running usage total."""
+    period = data.get(period_key, {})
+    return {
+        key: period[key]
+        for key in (
+            "period_start",
+            "first_reading_date",
+            "data_through",
+            "readings_count",
+        )
+        if period.get(key) is not None
+    }
+
+
 SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
     NESSensorEntityDescription(
         key="monthly_energy_usage",
@@ -84,6 +99,30 @@ SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: _safe_float(data.get("latest", {}).get("billedCharge")),
+    ),
+    NESSensorEntityDescription(
+        key="month_to_date_energy_usage",
+        translation_key="month_to_date_energy_usage",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=1,
+        value_fn=lambda data: _safe_float(
+            data.get("month_to_date", {}).get("usage_kwh")
+        ),
+        attribute_fn=lambda data: _usage_period_attributes(data, "month_to_date"),
+    ),
+    NESSensorEntityDescription(
+        key="year_to_date_energy_usage",
+        translation_key="year_to_date_energy_usage",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=1,
+        value_fn=lambda data: _safe_float(
+            data.get("year_to_date", {}).get("usage_kwh")
+        ),
+        attribute_fn=lambda data: _usage_period_attributes(data, "year_to_date"),
     ),
     NESSensorEntityDescription(
         key="yearly_energy_usage",

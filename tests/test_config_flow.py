@@ -34,7 +34,7 @@ async def _register_integration(hass: HomeAssistant) -> None:
             "documentation": "https://github.com/andrewnoruk/homeassistant-nes",
             "codeowners": ["@andrewnoruk"],
             "iot_class": "cloud_polling",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "requirements": [],
             "dependencies": [],
             "integration_type": "service",

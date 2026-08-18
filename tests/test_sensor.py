@@ -40,7 +40,7 @@ class TestSensorDescriptions:
     """Test sensor entity descriptions are correct."""
 
     def test_correct_number_of_sensors(self) -> None:
-        assert len(SENSOR_DESCRIPTIONS) == 9
+        assert len(SENSOR_DESCRIPTIONS) == 11
 
     def test_monthly_energy_is_energy_dashboard_compatible(self) -> None:
         monthly = next(
@@ -75,6 +75,20 @@ class TestSensorValues:
             },
             "total_kwh": 1695.0,
             "total_cost": 277.69,
+            "month_to_date": {
+                "usage_kwh": 1322.235,
+                "period_start": "2026-08-01",
+                "first_reading_date": "2026-08-01",
+                "data_through": "2026-08-15",
+                "readings_count": 15,
+            },
+            "year_to_date": {
+                "usage_kwh": 4179.4776,
+                "period_start": "2026-01-01",
+                "first_reading_date": "2026-06-22",
+                "data_through": "2026-08-15",
+                "readings_count": 55,
+            },
             "rates": {
                 "base_rate": 0.09254,
                 "fuel_cost_adjustment": 0.02610,
@@ -98,6 +112,25 @@ class TestSensorValues:
         data = self._make_data()
         desc = next(s for s in SENSOR_DESCRIPTIONS if s.key == "monthly_energy_cost")
         assert desc.value_fn(data) == pytest.approx(52.10)
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            ("month_to_date_energy_usage", 1322.235),
+            ("year_to_date_energy_usage", 4179.4776),
+        ],
+    )
+    def test_running_usage_values_and_attributes(
+        self, key: str, expected: float
+    ) -> None:
+        data = self._make_data()
+        desc = next(sensor for sensor in SENSOR_DESCRIPTIONS if sensor.key == key)
+
+        assert desc.value_fn(data) == pytest.approx(expected)
+        assert desc.attribute_fn is not None
+        attributes = desc.attribute_fn(data)
+        assert attributes["data_through"] == "2026-08-15"
+        assert attributes["readings_count"] > 0
 
     def test_yearly_energy_value(self) -> None:
         data = self._make_data()

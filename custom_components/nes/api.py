@@ -104,6 +104,7 @@ class NESApiClient:
         self._service_id: str | int | None = None
         self._service_type: str | None = None
         self._usage_service: dict[str, Any] | None = None
+        self._daily_usage: list[dict[str, Any]] | None = None
         self._payment_due_date: str | None = None
         self._token_lock = asyncio.Lock()
 
@@ -111,6 +112,13 @@ class NESApiClient:
     def customer_id(self) -> str | None:
         """Return the NES customer ID."""
         return self._customer_id
+
+    @property
+    def daily_usage(self) -> list[dict[str, Any]] | None:
+        """Return normalized daily usage for current Usage Dashboard services."""
+        if self._daily_usage is None:
+            return None
+        return [dict(item) for item in self._daily_usage]
 
     async def async_authenticate(self) -> None:
         """Authenticate with NES via B2C SSO + OAuth2 token exchange.
@@ -648,6 +656,7 @@ class NESApiClient:
             "serviceType"
         ) or selected_service.get("serviceCat")
         self._usage_service = selected_service
+        self._daily_usage = None
         self._payment_due_date = summary_type.get("paymentDueDate")
 
     async def async_get_customer(
@@ -728,6 +737,7 @@ class NESApiClient:
 
     async def _async_get_legacy_usage(self) -> list[dict[str, Any]]:
         """Fetch billed history from the original NES usage endpoint."""
+        self._daily_usage = None
 
         payload = {
             "customerId": self._customer_id,
@@ -790,7 +800,28 @@ class NESApiClient:
         if not isinstance(billing_history, list):
             raise NESApiError("NES billing response did not include billingData")
 
-        return self._aggregate_billing_history(daily_history, billing_history)
+        self._daily_usage = self._normalize_daily_usage(daily_history)
+        return self._aggregate_billing_history(self._daily_usage, billing_history)
+
+    @classmethod
+    def _normalize_daily_usage(cls, daily_history: list[Any]) -> list[dict[str, Any]]:
+        """Filter null padding and normalize one reading per calendar day."""
+        by_date: dict[str, float] = {}
+        for item in daily_history:
+            if not isinstance(item, dict):
+                continue
+            usage_date = cls._parse_usage_date(item.get("usageDate"))
+            usage_value = item.get("usageConsumptionValue")
+            if usage_date is None or usage_value is None:
+                continue
+            try:
+                by_date[usage_date.strftime("%Y-%m-%d")] = float(usage_value)
+            except (TypeError, ValueError):
+                continue
+        return [
+            {"usageDate": usage_date, "usageConsumptionValue": by_date[usage_date]}
+            for usage_date in sorted(by_date)
+        ]
 
     @staticmethod
     def _parse_usage_date(value: Any) -> datetime | None:

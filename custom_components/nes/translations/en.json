@@ -50,6 +50,12 @@
       "monthly_energy_cost": {
         "name": "Monthly energy cost"
       },
+      "month_to_date_energy_usage": {
+        "name": "Month-to-date energy usage"
+      },
+      "year_to_date_energy_usage": {
+        "name": "Year-to-date energy usage"
+      },
       "yearly_energy_usage": {
         "name": "Yearly energy usage"
       },

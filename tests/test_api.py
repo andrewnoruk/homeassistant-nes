@@ -478,6 +478,12 @@ class TestServiceLocations:
                 "uom": "KWH",
             },
         ]
+        assert client.daily_usage == [
+            {"usageDate": "2026-06-22", "usageConsumptionValue": 0.0},
+            {"usageDate": "2026-06-23", "usageConsumptionValue": 10.5},
+            {"usageDate": "2026-07-21", "usageConsumptionValue": 20.25},
+            {"usageDate": "2026-07-22", "usageConsumptionValue": 30.0},
+        ]
 
         detail_call = next(
             call
@@ -524,6 +530,23 @@ class TestServiceLocations:
 
         assert history[0]["billedConsumption"] == pytest.approx(12.5)
         assert history[0]["billedCharge"] == pytest.approx(-1234.56)
+
+    def test_daily_usage_normalization_deduplicates_and_sorts(self) -> None:
+        """Null padding is removed and the last reading for a date wins."""
+        daily_usage = NESApiClient._normalize_daily_usage(
+            [
+                {"usageDate": "2026-08-02", "usageConsumptionValue": 20},
+                {"usageDate": "2026-08-01", "usageConsumptionValue": None},
+                {"usageDate": "2026-08-01", "usageConsumptionValue": "10.5"},
+                {"usageDate": "2026-08-02", "usageConsumptionValue": 21},
+                {"usageDate": "bad", "usageConsumptionValue": 99},
+            ]
+        )
+
+        assert daily_usage == [
+            {"usageDate": "2026-08-01", "usageConsumptionValue": 10.5},
+            {"usageDate": "2026-08-02", "usageConsumptionValue": 21.0},
+        ]
 
     async def test_usage_rejects_response_without_history(self) -> None:
         """A changed or failed usage response is not mistaken for no usage."""

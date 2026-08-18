@@ -14,6 +14,8 @@ A custom [Home Assistant](https://www.home-assistant.io/) integration for [Nashv
 |--------|------|--------------|-------------|
 | Monthly Energy Usage | kWh | `energy` | Billed energy for the most recent billing period |
 | Monthly Energy Cost | USD | `monetary` | Billed cost for the most recent billing period |
+| Month-to-Date Energy Usage | kWh | `energy` | Running calendar-month total through the latest available daily reading |
+| Year-to-Date Energy Usage | kWh | `energy` | Running calendar-year total through the latest available daily reading |
 | Yearly Energy Usage | kWh | `energy` | Total energy over the last 13 billing periods |
 | Yearly Energy Cost | USD | `monetary` | Total cost over the last 13 billing periods |
 | Variable Energy Rate | USD/kWh | — | Current residential base rate plus TVA fuel adjustment |
@@ -22,7 +24,7 @@ A custom [Home Assistant](https://www.home-assistant.io/) integration for [Nashv
 | Monthly Service Charge | USD | `monetary` | Charge selected from average usage over the last 12 bills |
 | Monthly Grid Access Charge | USD | `monetary` | Charge selected from average usage over the last 12 bills |
 
-The **Monthly Energy Usage** sensor is compatible with Home Assistant's [Energy Dashboard](https://www.home-assistant.io/docs/energy/).
+The **Monthly Energy Usage** sensor is compatible with Home Assistant's [Energy Dashboard](https://www.home-assistant.io/docs/energy/). Month-to-date and year-to-date totals use the daily readings available for services shown in NES's current Usage Dashboard; they are unavailable for legacy services that only expose billed history.
 
 ## Installation
 
