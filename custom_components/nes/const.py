@@ -37,5 +37,5 @@ API_BASE_URL = "https://myaccount.nespower.com"
 API_ENDPOINT_CUSTOMER = "/rest/account/customer/"
 RATES_URL = "https://www.nespower.com/rates/"
 
-# Polling interval (seconds)
-UPDATE_INTERVAL_HOURS = 6
+# Poll at the same cadence as NES's half-hour interval meter data.
+UPDATE_INTERVAL_MINUTES = 30

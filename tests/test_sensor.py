@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 
@@ -68,26 +71,53 @@ class TestSensorValues:
 
     def _make_data(self) -> dict:
         return {
-            "monthly": [],
+            "monthly": [
+                {
+                    "chargeDate": "Jun 2026",
+                    "chargeDateRaw": "22-Jun-2026",
+                    "billedConsumption": "400",
+                    "billedCharge": "100.00",
+                },
+                {
+                    "chargeDate": "Jul 2026",
+                    "chargeDateRaw": "22-Jul-2026",
+                    "billStartDate": "2026-06-22",
+                    "billEndDate": "2026-07-22",
+                    "billedConsumption": "293",
+                    "billedCharge": "52.10",
+                },
+            ],
             "latest": {
+                "chargeDate": "Jul 2026",
+                "chargeDateRaw": "22-Jul-2026",
+                "billStartDate": "2026-06-22",
+                "billEndDate": "2026-07-22",
                 "billedConsumption": "293",
                 "billedCharge": "52.10",
             },
             "total_kwh": 1695.0,
             "total_cost": 277.69,
             "month_to_date": {
-                "usage_kwh": 1322.235,
+                "usage_kwh": 1335.7926,
                 "period_start": "2026-08-01",
                 "first_reading_date": "2026-08-01",
-                "data_through": "2026-08-15",
-                "readings_count": 15,
+                "data_through": "2026-08-18 06:00",
+                "readings_count": 17,
+                "interval_readings_count": 12,
+                "current_day_usage_kwh": 13.5576,
+                "interval_minutes": 30,
+                "data_source": "daily_totals_and_intervals",
             },
             "year_to_date": {
-                "usage_kwh": 4179.4776,
+                "usage_kwh": 4193.0352,
                 "period_start": "2026-01-01",
                 "first_reading_date": "2026-06-22",
-                "data_through": "2026-08-15",
-                "readings_count": 55,
+                "data_through": "2026-08-18 06:00",
+                "readings_count": 54,
+                "interval_readings_count": 12,
+                "current_day_usage_kwh": 13.5576,
+                "interval_minutes": 30,
+                "data_source": "daily_totals_and_intervals",
             },
             "rates": {
                 "base_rate": 0.09254,
@@ -114,10 +144,25 @@ class TestSensorValues:
         assert desc.value_fn(data) == pytest.approx(52.10)
 
     @pytest.mark.parametrize(
+        "key",
+        ["monthly_energy_usage", "monthly_energy_cost"],
+    )
+    def test_latest_bill_attributes_explain_period(self, key: str) -> None:
+        data = self._make_data()
+        desc = next(sensor for sensor in SENSOR_DESCRIPTIONS if sensor.key == key)
+
+        assert desc.attribute_fn is not None
+        assert desc.attribute_fn(data) == {
+            "bill_period_start": "2026-06-22",
+            "bill_period_end": "2026-07-22",
+            "bill_date": "22-Jul-2026",
+        }
+
+    @pytest.mark.parametrize(
         ("key", "expected"),
         [
-            ("month_to_date_energy_usage", 1322.235),
-            ("year_to_date_energy_usage", 4179.4776),
+            ("month_to_date_energy_usage", 1335.7926),
+            ("year_to_date_energy_usage", 4193.0352),
         ],
     )
     def test_running_usage_values_and_attributes(
@@ -129,8 +174,12 @@ class TestSensorValues:
         assert desc.value_fn(data) == pytest.approx(expected)
         assert desc.attribute_fn is not None
         attributes = desc.attribute_fn(data)
-        assert attributes["data_through"] == "2026-08-15"
+        assert attributes["data_through"] == "2026-08-18 06:00"
         assert attributes["readings_count"] > 0
+        assert attributes["interval_readings_count"] == 12
+        assert attributes["current_day_usage_kwh"] == pytest.approx(13.5576)
+        assert attributes["interval_minutes"] == 30
+        assert attributes["data_source"] == "daily_totals_and_intervals"
 
     def test_yearly_energy_value(self) -> None:
         data = self._make_data()
@@ -141,6 +190,21 @@ class TestSensorValues:
         data = self._make_data()
         desc = next(s for s in SENSOR_DESCRIPTIONS if s.key == "yearly_energy_cost")
         assert desc.value_fn(data) == pytest.approx(277.69)
+
+    @pytest.mark.parametrize(
+        "key",
+        ["yearly_energy_usage", "yearly_energy_cost"],
+    )
+    def test_rolling_bill_attributes_explain_coverage(self, key: str) -> None:
+        data = self._make_data()
+        desc = next(sensor for sensor in SENSOR_DESCRIPTIONS if sensor.key == key)
+
+        assert desc.attribute_fn is not None
+        assert desc.attribute_fn(data) == {
+            "billing_periods": 2,
+            "first_bill_date": "22-Jun-2026",
+            "last_bill_date": "22-Jul-2026",
+        }
 
     @pytest.mark.parametrize(
         ("key", "expected"),
@@ -188,3 +252,27 @@ class TestSensorValues:
         for desc in SENSOR_DESCRIPTIONS:
             value = desc.value_fn(data)
             assert value is None or isinstance(value, float)
+
+
+def test_usage_sensor_names_distinguish_billed_and_calendar_totals() -> None:
+    """User-facing names make each total's time basis explicit."""
+    translations_path = (
+        Path(__file__).parents[1]
+        / "custom_components"
+        / "nes"
+        / "translations"
+        / "en.json"
+    )
+    translations = json.loads(translations_path.read_text())
+    sensors = translations["entity"]["sensor"]
+
+    assert sensors["monthly_energy_usage"]["name"] == (
+        "Latest billed-period energy usage"
+    )
+    assert sensors["month_to_date_energy_usage"]["name"] == (
+        "Calendar month-to-date energy usage"
+    )
+    assert sensors["yearly_energy_usage"]["name"] == "Rolling billed energy usage"
+    assert sensors["year_to_date_energy_usage"]["name"] == (
+        "Calendar year-to-date energy usage"
+    )

@@ -435,6 +435,28 @@ class TestServiceLocations:
                 ]
             },
         )
+        interval = _make_response(
+            200,
+            {
+                "history": [
+                    {
+                        "readDateTime": "2026-08-16 00:30",
+                        "intervalType": "30",
+                        "usageConsumptionValue": 1.25,
+                    },
+                    {
+                        "readDateTime": "2026-08-16 01:00",
+                        "intervalType": "30",
+                        "usageConsumptionValue": 2.5,
+                    },
+                    {
+                        "readDateTime": "2026-08-16 01:30",
+                        "intervalType": "30",
+                        "usageConsumptionValue": None,
+                    },
+                ]
+            },
+        )
         session = MagicMock()
         session.post = MagicMock(
             side_effect=[
@@ -442,6 +464,7 @@ class TestServiceLocations:
                 _make_ctx(services),
                 _make_ctx(detail),
                 _make_ctx(billing),
+                _make_ctx(interval),
             ]
         )
         client = NESApiClient("user@example.com", "pass", session)
@@ -462,7 +485,7 @@ class TestServiceLocations:
                 "chargeDateRaw": "22-Jun-2026",
                 "billStartDate": "2026-05-23",
                 "billEndDate": "2026-06-22",
-                "billedConsumption": None,
+                "billedConsumption": 0.0,
                 "billedCharge": 20.0,
                 "daysOfService": 30,
                 "uom": "KWH",
@@ -472,18 +495,25 @@ class TestServiceLocations:
                 "chargeDateRaw": "22-Jul-2026",
                 "billStartDate": "2026-06-22",
                 "billEndDate": "2026-07-22",
-                "billedConsumption": 30.75,
+                "billedConsumption": 60.75,
                 "billedCharge": 306.93,
                 "daysOfService": 30,
                 "uom": "KWH",
             },
         ]
         assert client.daily_usage == [
-            {"usageDate": "2026-06-22", "usageConsumptionValue": 0.0},
-            {"usageDate": "2026-06-23", "usageConsumptionValue": 10.5},
-            {"usageDate": "2026-07-21", "usageConsumptionValue": 20.25},
-            {"usageDate": "2026-07-22", "usageConsumptionValue": 30.0},
+            {"usageDate": "2026-06-21", "usageConsumptionValue": 0.0},
+            {"usageDate": "2026-06-22", "usageConsumptionValue": 10.5},
+            {"usageDate": "2026-07-20", "usageConsumptionValue": 20.25},
+            {"usageDate": "2026-07-21", "usageConsumptionValue": 30.0},
         ]
+        assert client.current_interval_usage == {
+            "usageDate": "2026-08-16",
+            "usageConsumptionValue": 3.75,
+            "dataThrough": "2026-08-16 01:00",
+            "readingsCount": 2,
+            "intervalMinutes": 30,
+        }
 
         detail_call = next(
             call
@@ -493,7 +523,7 @@ class TestServiceLocations:
         assert detail_call.kwargs["json"] == {
             "customerId": "105112",
             "fromDate": "2025-07-01 12:00",
-            "toDate": "2026-08-15 11:59",
+            "toDate": "2026-08-16 11:59",
             "billDate": "2026-07-22",
             "meterNumber": "meter-1",
             "serviceNumber": "service-number-1",
@@ -502,6 +532,16 @@ class TestServiceLocations:
             "accountContext": account_context,
             "contractNum": "contract-1",
             "netContractNum": None,
+        }
+        interval_call = next(
+            call
+            for call in session.post.call_args_list
+            if call.args[0].endswith("/rest/usage/detail/day")
+        )
+        assert interval_call.kwargs["json"] == {
+            **detail_call.kwargs["json"],
+            "fromDate": "2026-08-16 12:00",
+            "toDate": "2026-08-16 11:59",
         }
         billing_call = next(
             call
@@ -544,9 +584,82 @@ class TestServiceLocations:
         )
 
         assert daily_usage == [
-            {"usageDate": "2026-08-01", "usageConsumptionValue": 10.5},
-            {"usageDate": "2026-08-02", "usageConsumptionValue": 21.0},
+            {"usageDate": "2026-07-31", "usageConsumptionValue": 10.5},
+            {"usageDate": "2026-08-01", "usageConsumptionValue": 21.0},
         ]
+
+    def test_interval_usage_normalization_ignores_padding_and_bad_values(self) -> None:
+        """Only published interval readings contribute to the partial day."""
+        interval_usage = NESApiClient._normalize_interval_usage(
+            [
+                {
+                    "readDateTime": "2026-08-18 00:30",
+                    "intervalType": "30",
+                    "usageConsumptionValue": "1.25",
+                },
+                {
+                    "readDateTime": "2026-08-18 01:00",
+                    "intervalType": "30",
+                    "usageConsumptionValue": 2.5,
+                },
+                {
+                    "readDateTime": "2026-08-18 01:30",
+                    "intervalType": "30",
+                    "usageConsumptionValue": None,
+                },
+                {
+                    "readDateTime": "2026-08-18 02:00",
+                    "intervalType": "30",
+                    "usageConsumptionValue": "bad",
+                },
+            ],
+            datetime(2026, 8, 18).date(),
+        )
+
+        assert interval_usage == {
+            "usageDate": "2026-08-18",
+            "usageConsumptionValue": 3.75,
+            "dataThrough": "2026-08-18 01:00",
+            "readingsCount": 2,
+            "intervalMinutes": 30,
+        }
+
+    async def test_interval_failure_falls_back_to_completed_daily_usage(self) -> None:
+        """A transient optional interval failure does not discard daily data."""
+        client = NESApiClient("user@example.com", "pass", MagicMock())
+        client._async_post_json = AsyncMock(
+            side_effect=NESConnectionError("interval unavailable")
+        )
+        client._current_interval_usage = {
+            "usageDate": "2026-08-18",
+            "usageConsumptionValue": 3.75,
+            "dataThrough": "2026-08-18 01:00",
+            "readingsCount": 2,
+            "intervalMinutes": 30,
+        }
+
+        result = await client._async_get_current_interval_usage(
+            {}, datetime(2026, 8, 18).date()
+        )
+
+        assert result == client.current_interval_usage
+
+    async def test_interval_failure_does_not_carry_usage_into_next_day(self) -> None:
+        """A prior day's partial snapshot cannot leak across midnight."""
+        client = NESApiClient("user@example.com", "pass", MagicMock())
+        client._async_post_json = AsyncMock(
+            side_effect=NESConnectionError("interval unavailable")
+        )
+        client._current_interval_usage = {
+            "usageDate": "2026-08-17",
+            "usageConsumptionValue": 101.6046,
+        }
+
+        result = await client._async_get_current_interval_usage(
+            {}, datetime(2026, 8, 18).date()
+        )
+
+        assert result is None
 
     async def test_usage_rejects_response_without_history(self) -> None:
         """A changed or failed usage response is not mistaken for no usage."""

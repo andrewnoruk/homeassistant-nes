@@ -74,9 +74,44 @@ def _usage_period_attributes(data: dict[str, Any], period_key: str) -> dict[str,
             "first_reading_date",
             "data_through",
             "readings_count",
+            "interval_readings_count",
+            "current_day_usage_kwh",
+            "interval_minutes",
+            "data_source",
         )
         if period.get(key) is not None
     }
+
+
+def _latest_bill_attributes(data: dict[str, Any]) -> dict[str, Any]:
+    """Return statement boundaries for the latest billed period."""
+    latest = data.get("latest", {})
+    values = {
+        "bill_period_start": latest.get("billStartDate"),
+        "bill_period_end": latest.get("billEndDate"),
+        "bill_date": latest.get("chargeDateRaw") or latest.get("chargeDate"),
+    }
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _rolling_bill_attributes(data: dict[str, Any]) -> dict[str, Any]:
+    """Return coverage details for rolling billed totals."""
+    monthly = data.get("monthly", [])
+    bills = [item for item in monthly if isinstance(item, dict)]
+    values = {
+        "billing_periods": len(bills),
+        "first_bill_date": (
+            bills[0].get("chargeDateRaw") or bills[0].get("chargeDate")
+            if bills
+            else None
+        ),
+        "last_bill_date": (
+            bills[-1].get("chargeDateRaw") or bills[-1].get("chargeDate")
+            if bills
+            else None
+        ),
+    }
+    return {key: value for key, value in values.items() if value is not None}
 
 
 SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
@@ -90,6 +125,7 @@ SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
         value_fn=lambda data: _safe_float(
             data.get("latest", {}).get("billedConsumption")
         ),
+        attribute_fn=_latest_bill_attributes,
     ),
     NESSensorEntityDescription(
         key="monthly_energy_cost",
@@ -99,6 +135,7 @@ SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: _safe_float(data.get("latest", {}).get("billedCharge")),
+        attribute_fn=_latest_bill_attributes,
     ),
     NESSensorEntityDescription(
         key="month_to_date_energy_usage",
@@ -132,6 +169,7 @@ SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=0,
         value_fn=lambda data: data.get("total_kwh"),
+        attribute_fn=_rolling_bill_attributes,
     ),
     NESSensorEntityDescription(
         key="yearly_energy_cost",
@@ -141,6 +179,7 @@ SENSOR_DESCRIPTIONS: tuple[NESSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("total_cost"),
+        attribute_fn=_rolling_bill_attributes,
     ),
     NESSensorEntityDescription(
         key="variable_energy_rate",

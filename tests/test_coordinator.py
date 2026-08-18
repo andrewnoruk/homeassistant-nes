@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -38,8 +38,16 @@ async def test_coordinator_successful_update(hass: HomeAssistant) -> None:
         {"usageDate": "2026-08-16", "usageConsumptionValue": 50},
         {"usageDate": "2026-08-18", "usageConsumptionValue": 100},
     ]
+    client.current_interval_usage = {
+        "usageDate": "2026-08-17",
+        "usageConsumptionValue": 12.5,
+        "dataThrough": "2026-08-17 06:30",
+        "readingsCount": 13,
+        "intervalMinutes": 30,
+    }
 
     coordinator = NESDataUpdateCoordinator(hass, client)
+    assert coordinator.update_interval == timedelta(minutes=30)
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(
             "custom_components.nes.coordinator.dt_util.now",
@@ -57,18 +65,26 @@ async def test_coordinator_successful_update(hass: HomeAssistant) -> None:
     assert data["rates"]["grid_access_charge"] == pytest.approx(7.33)
     assert data["rates"]["grid_access_charge_tier"] == 2
     assert data["month_to_date"] == {
-        "usage_kwh": 120.0,
+        "usage_kwh": 132.5,
         "period_start": "2026-08-01",
         "first_reading_date": "2026-08-01",
-        "data_through": "2026-08-16",
+        "data_through": "2026-08-17 06:30",
         "readings_count": 3,
+        "interval_readings_count": 13,
+        "current_day_usage_kwh": 12.5,
+        "interval_minutes": 30,
+        "data_source": "daily_totals_and_intervals",
     }
     assert data["year_to_date"] == {
-        "usage_kwh": 150.0,
+        "usage_kwh": 162.5,
         "period_start": "2026-01-01",
         "first_reading_date": "2026-01-01",
-        "data_through": "2026-08-16",
+        "data_through": "2026-08-17 06:30",
         "readings_count": 5,
+        "interval_readings_count": 13,
+        "current_day_usage_kwh": 12.5,
+        "interval_minutes": 30,
+        "data_source": "daily_totals_and_intervals",
     }
 
 
@@ -175,3 +191,34 @@ def test_usage_period_distinguishes_unsupported_from_no_current_readings() -> No
     assert supported["usage_kwh"] == 0.0
     assert supported["readings_count"] == 0
     assert supported["data_through"] is None
+
+
+def test_usage_period_adds_partial_day_without_replacing_completed_days() -> None:
+    """Current intervals are distinct from the preceding completed daily total."""
+    result = _usage_period(
+        [
+            {"usageDate": "2026-08-16", "usageConsumptionValue": 90.0},
+            {"usageDate": "2026-08-17", "usageConsumptionValue": 101.6046},
+        ],
+        date(2026, 8, 1),
+        date(2026, 8, 18),
+        {
+            "usageDate": "2026-08-18",
+            "usageConsumptionValue": 13.5576,
+            "dataThrough": "2026-08-18 06:00",
+            "readingsCount": 12,
+            "intervalMinutes": 30,
+        },
+    )
+
+    assert result == {
+        "usage_kwh": 205.1622,
+        "period_start": "2026-08-01",
+        "first_reading_date": "2026-08-16",
+        "data_through": "2026-08-18 06:00",
+        "readings_count": 2,
+        "interval_readings_count": 12,
+        "current_day_usage_kwh": 13.5576,
+        "interval_minutes": 30,
+        "data_source": "daily_totals_and_intervals",
+    }

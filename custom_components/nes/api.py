@@ -9,7 +9,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -105,6 +105,7 @@ class NESApiClient:
         self._service_type: str | None = None
         self._usage_service: dict[str, Any] | None = None
         self._daily_usage: list[dict[str, Any]] | None = None
+        self._current_interval_usage: dict[str, Any] | None = None
         self._payment_due_date: str | None = None
         self._token_lock = asyncio.Lock()
 
@@ -119,6 +120,13 @@ class NESApiClient:
         if self._daily_usage is None:
             return None
         return [dict(item) for item in self._daily_usage]
+
+    @property
+    def current_interval_usage(self) -> dict[str, Any] | None:
+        """Return the current day's available interval usage."""
+        if self._current_interval_usage is None:
+            return None
+        return dict(self._current_interval_usage)
 
     async def async_authenticate(self) -> None:
         """Authenticate with NES via B2C SSO + OAuth2 token exchange.
@@ -657,6 +665,7 @@ class NESApiClient:
         ) or selected_service.get("serviceCat")
         self._usage_service = selected_service
         self._daily_usage = None
+        self._current_interval_usage = None
         self._payment_due_date = summary_type.get("paymentDueDate")
 
     async def async_get_customer(
@@ -738,6 +747,7 @@ class NESApiClient:
     async def _async_get_legacy_usage(self) -> list[dict[str, Any]]:
         """Fetch billed history from the original NES usage endpoint."""
         self._daily_usage = None
+        self._current_interval_usage = None
 
         payload = {
             "customerId": self._customer_id,
@@ -769,7 +779,10 @@ class NESApiClient:
         assert self._account_context is not None
         assert self._usage_service is not None
 
-        end_date = dt_util.now().date() - timedelta(days=1)
+        # NES labels each completed daily total with its ending boundary. A row
+        # dated today therefore contains yesterday's usage, while /detail/day
+        # provides the still-in-progress usage for today.
+        end_date = dt_util.now().date()
         start_date = (end_date - timedelta(days=400)).replace(day=1)
         service = self._usage_service
         detail_payload = {
@@ -785,11 +798,17 @@ class NESApiClient:
             "contractNum": service["serviceContract"],
             "netContractNum": service.get("netContractNum"),
         }
+        interval_payload = {
+            **detail_payload,
+            "fromDate": f"{end_date:%Y-%m-%d} 12:00",
+            "toDate": f"{end_date:%Y-%m-%d} 11:59",
+        }
         billing_payload = self._account_request(account_context=self._account_context)
 
-        detail_result, billing_result = await asyncio.gather(
+        detail_result, billing_result, interval_usage = await asyncio.gather(
             self._async_post_json("/rest/usage/detail/month", detail_payload),
             self._async_post_json("/rest/billing/history", billing_payload),
+            self._async_get_current_interval_usage(interval_payload, end_date),
         )
         daily_history = detail_result.get("history")
         if not isinstance(daily_history, list):
@@ -801,11 +820,41 @@ class NESApiClient:
             raise NESApiError("NES billing response did not include billingData")
 
         self._daily_usage = self._normalize_daily_usage(daily_history)
+        self._current_interval_usage = interval_usage
         return self._aggregate_billing_history(self._daily_usage, billing_history)
+
+    async def _async_get_current_interval_usage(
+        self,
+        payload: dict[str, Any],
+        usage_date: date,
+    ) -> dict[str, Any] | None:
+        """Fetch current interval usage without failing the daily update."""
+        try:
+            result = await self._async_post_json("/rest/usage/detail/day", payload)
+        except (NESApiError, NESConnectionError) as err:
+            LOGGER.warning("Unable to update current NES interval usage: %s", err)
+            return self._interval_usage_fallback(usage_date)
+
+        history = result.get("history")
+        if not isinstance(history, list):
+            LOGGER.warning("NES interval usage response did not include a history list")
+            return self._interval_usage_fallback(usage_date)
+        return self._normalize_interval_usage(
+            history, usage_date
+        ) or self._interval_usage_fallback(usage_date)
+
+    def _interval_usage_fallback(self, usage_date: date) -> dict[str, Any] | None:
+        """Keep the last successful partial-day snapshot after a transient error."""
+        if (
+            self._current_interval_usage is not None
+            and self._current_interval_usage.get("usageDate") == usage_date.isoformat()
+        ):
+            return dict(self._current_interval_usage)
+        return None
 
     @classmethod
     def _normalize_daily_usage(cls, daily_history: list[Any]) -> list[dict[str, Any]]:
-        """Filter null padding and normalize one reading per calendar day."""
+        """Filter padding and normalize NES end dates to consumption dates."""
         by_date: dict[str, float] = {}
         for item in daily_history:
             if not isinstance(item, dict):
@@ -815,13 +864,72 @@ class NESApiClient:
             if usage_date is None or usage_value is None:
                 continue
             try:
-                by_date[usage_date.strftime("%Y-%m-%d")] = float(usage_value)
+                consumption_date = usage_date - timedelta(days=1)
+                by_date[consumption_date.strftime("%Y-%m-%d")] = float(usage_value)
             except (TypeError, ValueError):
                 continue
         return [
             {"usageDate": usage_date, "usageConsumptionValue": by_date[usage_date]}
             for usage_date in sorted(by_date)
         ]
+
+    @classmethod
+    def _normalize_interval_usage(
+        cls,
+        interval_history: list[Any],
+        usage_date: date,
+    ) -> dict[str, Any] | None:
+        """Aggregate available interval rows for one in-progress day."""
+        values: list[float] = []
+        timestamps: list[datetime] = []
+        interval_minutes: set[int] = set()
+
+        for item in interval_history:
+            if not isinstance(item, dict):
+                continue
+            usage_value = item.get("usageConsumptionValue")
+            if usage_value is None:
+                continue
+            try:
+                values.append(float(usage_value))
+            except (TypeError, ValueError):
+                continue
+
+            timestamp = cls._parse_interval_timestamp(item.get("readDateTime"))
+            if timestamp is not None:
+                timestamps.append(timestamp)
+            try:
+                interval_minutes.add(int(item.get("intervalType")))
+            except (TypeError, ValueError):
+                pass
+
+        if not values:
+            return None
+
+        latest_timestamp = max(timestamps) if timestamps else None
+        return {
+            "usageDate": usage_date.isoformat(),
+            "usageConsumptionValue": round(sum(values), 4),
+            "dataThrough": (
+                latest_timestamp.isoformat(sep=" ", timespec="minutes")
+                if latest_timestamp is not None
+                else usage_date.isoformat()
+            ),
+            "readingsCount": len(values),
+            "intervalMinutes": (
+                next(iter(interval_minutes)) if len(interval_minutes) == 1 else None
+            ),
+        }
+
+    @staticmethod
+    def _parse_interval_timestamp(value: Any) -> datetime | None:
+        """Parse a timestamp returned in an NES interval row."""
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
 
     @staticmethod
     def _parse_usage_date(value: Any) -> datetime | None:

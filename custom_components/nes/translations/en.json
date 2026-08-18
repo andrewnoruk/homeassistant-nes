@@ -45,22 +45,22 @@
   "entity": {
     "sensor": {
       "monthly_energy_usage": {
-        "name": "Monthly energy usage"
+        "name": "Latest billed-period energy usage"
       },
       "monthly_energy_cost": {
-        "name": "Monthly energy cost"
+        "name": "Latest bill amount"
       },
       "month_to_date_energy_usage": {
-        "name": "Month-to-date energy usage"
+        "name": "Calendar month-to-date energy usage"
       },
       "year_to_date_energy_usage": {
-        "name": "Year-to-date energy usage"
+        "name": "Calendar year-to-date energy usage"
       },
       "yearly_energy_usage": {
-        "name": "Yearly energy usage"
+        "name": "Rolling billed energy usage"
       },
       "yearly_energy_cost": {
-        "name": "Yearly energy cost"
+        "name": "Rolling billed amount"
       },
       "variable_energy_rate": {
         "name": "Variable energy rate"

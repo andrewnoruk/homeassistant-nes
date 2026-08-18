@@ -12,19 +12,19 @@ A custom [Home Assistant](https://www.home-assistant.io/) integration for [Nashv
 
 | Sensor | Unit | Device Class | Description |
 |--------|------|--------------|-------------|
-| Monthly Energy Usage | kWh | `energy` | Billed energy for the most recent billing period |
-| Monthly Energy Cost | USD | `monetary` | Billed cost for the most recent billing period |
-| Month-to-Date Energy Usage | kWh | `energy` | Running calendar-month total through the latest available daily reading |
-| Year-to-Date Energy Usage | kWh | `energy` | Running calendar-year total through the latest available daily reading |
-| Yearly Energy Usage | kWh | `energy` | Total energy over the last 13 billing periods |
-| Yearly Energy Cost | USD | `monetary` | Total cost over the last 13 billing periods |
+| Latest Billed-Period Energy Usage | kWh | `energy` | Energy on the most recent completed NES bill |
+| Latest Bill Amount | USD | `monetary` | Total amount on the most recent completed NES bill |
+| Calendar Month-to-Date Energy Usage | kWh | `energy` | Running calendar-month total through the latest available meter reading |
+| Calendar Year-to-Date Energy Usage | kWh | `energy` | Running calendar-year total through the latest available meter reading |
+| Rolling Billed Energy Usage | kWh | `energy` | Total energy over the available completed bills, up to 13 periods |
+| Rolling Billed Amount | USD | `monetary` | Total amount over the available completed bills, up to 13 periods |
 | Variable Energy Rate | USD/kWh | — | Current residential base rate plus TVA fuel adjustment |
 | Base Energy Rate | USD/kWh | — | Current residential base energy rate |
 | Fuel Cost Adjustment | USD/kWh | — | Current monthly TVA fuel cost adjustment |
 | Monthly Service Charge | USD | `monetary` | Charge selected from average usage over the last 12 bills |
 | Monthly Grid Access Charge | USD | `monetary` | Charge selected from average usage over the last 12 bills |
 
-The **Monthly Energy Usage** sensor is compatible with Home Assistant's [Energy Dashboard](https://www.home-assistant.io/docs/energy/). Month-to-date and year-to-date totals use the daily readings available for services shown in NES's current Usage Dashboard; they are unavailable for legacy services that only expose billed history.
+The **Latest Billed-Period Energy Usage** sensor is compatible with Home Assistant's [Energy Dashboard](https://www.home-assistant.io/docs/energy/). Calendar month-to-date and year-to-date totals combine completed daily readings with the current day's available 30-minute readings. Their attributes show the latest reading timestamp, current-day subtotal, interval count, and data source. These sensors are unavailable for legacy services that only expose billed history.
 
 ## Installation
 
@@ -61,7 +61,7 @@ The integration authenticates with NES through a multi-step flow:
 2. **NES JWT exchange** to create a server-side session
 3. **NES OAuth2** token grant with the SSO session
 
-Usage data and the public NES residential rate schedule are polled every **6 hours**. For services shown in NES's current Usage Dashboard, the integration combines daily meter readings with statement history to preserve the billed monthly and yearly sensor values. Accounts that still expose the original billed-usage API continue using it as a fallback.
+Usage data and the public NES residential rate schedule are polled every **30 minutes**. For services shown in NES's current Usage Dashboard, the integration combines completed daily totals, current-day interval readings, and statement history. Accounts that still expose the original billed-usage API continue using it as a fallback.
 
 ## Troubleshooting
 
